@@ -1,0 +1,108 @@
+# python3 lifted heavily from the AWS tutorial: AWS Sustainability Workshop
+# minor edits to details
+# major edit to query
+
+import time
+import boto3
+import json
+import collections
+import operator
+import datetime
+import os
+
+# athena database name
+athenaDatabase = 'europower'
+
+# S3 constant
+S3_QUERY='query-result'
+S3_BUCKET ='aws-sustainability-event'
+
+
+# set defaults
+DEFAULT_CITIES = "best" # choices are 'list' (returns all cities) or 'best' (returns city with closest temp to target temp)
+# number of retries
+RETRY_COUNT = 15
+
+## override defaults with Environment variables if available
+if 'GLUE_DATABASE' in os.environ:
+    athenaDatabase = os.environ['GLUE_DATABASE']
+
+if 'S3_QUERY_OUTPUT_LOCATION' in os.environ:
+    S3_OUTPUT = os.environ['S3_QUERY_OUTPUT_LOCATION']
+else:
+    S3_OUTPUT = 's3://' + S3_BUCKET + '/' + S3_QUERY
+
+if 'CONSUME_TABLE_NAME' in os.environ:
+    CONSUME_TABLE_NAME = os.environ['CONSUME_TABLE_NAME']
+else:
+    CONSUME_TABLE_NAME = 'consumetable'
+
+if 'SOLAR_TABLE_NAME' in os.environ:
+    SOLAR_TABLE_NAME = os.environ['SOLAR_TABLE_NAME']
+else:
+    SOLAR_TABLE_NAME = 'solartable'
+    
+    
+    
+def lambda_handler(event, context):
+    # look for a couple different options:
+    date_bits = 2000
+    try:
+        date_bits = event['queryStringParameters']['after']
+    except:
+        pass # earliest data
+    
+    
+    # query has hardcoded elements for simplicity of this workshop
+    query = f"select a.geo, a.time, a.unit, a.value, a.flag, b.plant_tec, b.value, b.flag from consumetable as a inner join solartable as b on a.geo = b.geo and a.time = b.time where a.time > '{date_bits}'"
+    
+    # make the query
+    
+    # athena client
+    client = boto3.client('athena')
+
+    # Execution
+    response = client.start_query_execution(
+        QueryString=query,
+        QueryExecutionContext={
+            'Database': athenaDatabase
+        },
+        ResultConfiguration={
+            'OutputLocation': S3_OUTPUT,
+        }
+    )
+
+    # get query execution id
+    query_execution_id = response['QueryExecutionId']
+    print(query_execution_id)
+
+    # get execution status
+    for i in range(1, 1 + RETRY_COUNT):
+
+        # get query execution
+        query_status = client.get_query_execution(QueryExecutionId=query_execution_id)
+        query_execution_status = query_status['QueryExecution']['Status']['State']
+
+        if query_execution_status == 'SUCCEEDED':
+            print("STATUS:" + query_execution_status)
+            break
+
+        if query_execution_status == 'FAILED':
+            raise Exception("STATUS:" + query_execution_status)
+        else:
+            print("STATUS:" + query_execution_status)
+            time.sleep(i)
+    else:
+        client.stop_query_execution(QueryExecutionId=query_execution_id)
+        raise Exception('TIME OVER')
+
+    # get query results
+    result = client.get_query_results(QueryExecutionId=query_execution_id)
+
+    
+    # process the data returned from the query   
+    return {
+        'statusCode': 200,
+        'headers': { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+        'body': json.dumps(result)
+    }
